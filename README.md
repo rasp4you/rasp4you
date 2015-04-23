@@ -5,5 +5,7 @@ All services, also not http, are available from everywhere. Moreover all ip came
 For install:
 
 1) copy rasp4you.bin on your raspberry
+
 2) chmod 755 rasp4you.bin
+
 3) ./rasp4you.bin
