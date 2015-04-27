@@ -9,7 +9,7 @@ For install:
 
 3) ./rasp4you.bin
 
-After online free your domain reservation you can access all raspberry services and ip camera on your private network using a domain name. For example if you choose domain "farrel" you have available from everywhere on internet:
+After online free your domain reservation you can access to all raspberry services and ip camera on your private network using a domain name. For example if you choose domain "farrel" you have available from everywhere on internet:
 
 ssh root@farrel.rasp4you.com
 
