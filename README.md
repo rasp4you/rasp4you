@@ -3,7 +3,7 @@ You can connect to Raspberrys located in your home network using a private domai
 
 For install:
 
-1) copy rasp4you.bin on your raspberry
+1) copy rasp4you.bin on your Raspberry
 
 2) chmod 755 rasp4you.bin
 
