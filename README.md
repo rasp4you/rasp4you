@@ -19,7 +19,7 @@ https://farrel.raspyou.com (your secure apache)
 
 http://farrel.raspyou.com:777 (your apache on 777 port)
 
-also all udp e tcp port services on rasperry are available.
+also all udp and tcp port services on rasperry are available.
 
 And moverover:
 
