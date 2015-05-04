@@ -516,10 +516,19 @@ int alive_ips(void)
 		addr.sll_pkttype  = PACKET_BROADCAST;
 
 		for(i = 0,p = root_lan;p != NULL;p = p->next, i++) {
+			int j;
+
 			if(p->index != index)
 				continue;
-			now = time(NULL);
+
 			p->todo = 0;
+			for(j = 0;j < 16;j++)
+				if(local_addresses[j] == 0 || local_addresses[j] == p->ip)
+					break;
+			if(local_addresses[j] == p->ip)
+				continue;
+
+			now = time(NULL);
 			if(p->time) {
 				if(memcmp(p->mac,"\x00\x00\x00\x00\x00\x00",6) == 0) {
 					if(now - p->time < (5*60+i/10))
