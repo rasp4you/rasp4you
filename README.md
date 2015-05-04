@@ -31,4 +31,4 @@ http://livingroom.farrel.rasp4you.com:8080 (ip camera on 8080 port)
 
 http://kitchen.farrel.rasp4you.com (another ip camera)
 
-and so your home is "clouded".
+and so your home is  "clouded".
