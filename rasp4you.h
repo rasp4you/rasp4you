@@ -40,6 +40,7 @@ struct lan
 	char hw[6];	// indirizzo scheda
 	char mac[6];
 	char ottanta;
+	char ottomila;
 	char ottantaottanta;
 	char index;
 	char todo;
@@ -82,10 +83,12 @@ struct old_lan {
 extern struct sockaddr_in server_tcp;
 extern struct sockaddr_in server_udp;
 extern char key[];
+extern char *raspberry_id;
 extern unsigned short LOCAL_PORT, REMOTE_PORT;
 extern struct lan *root_lan;
 extern char *skeleton[];
 extern unsigned LOCAL_ADDR;
+extern unsigned local_addresses[];
 extern unsigned serial;
 extern char *machine_id;
 extern unsigned router;

@@ -35,6 +35,7 @@ static char *keybin;
 
 char *machine_id;
 unsigned serial;
+//char *raspberry_id;
 char key[65];
 
 int get_machine_id(void)
@@ -78,6 +79,8 @@ int get_machine_id(void)
 					if(t != NULL)
 						*t = 0;
 					strcpy(s,v);
+					//raspberry_id = malloc(strlen(s)+1);
+					//strcpy(raspberry_id,s);
 				}
 				break;
 			}

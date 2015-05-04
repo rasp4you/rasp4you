@@ -31,6 +31,7 @@
 #include "rasp4you.h"
 
 unsigned LOCAL_ADDR;
+unsigned local_addresses[17];
 unsigned router;
 
 struct lan *root_lan;
@@ -66,14 +67,12 @@ static int arp_response(struct arp *resp)
 	int ret;
 
 	ret = 0;
-	if(resp->type[0] != 0x08 || resp->type[1] != 0x06)
-		return 0;
+	resp = (struct arp *)((char *)resp - 14);
 	if(resp->code[0] != 0 || resp->code[1] != 2)
 		return 0;
 	now = time(NULL);
 	for(p = root_lan;p != NULL;p = p->next) {
 		if(memcmp(&p->ip,resp->ip_src,4) == 0) {
-
 			if(!p->alive || memcmp(p->mac,resp->eth_src,6)) {
 				memcpy(p->mac,resp->eth_src,6);
 				p->tested = 0;
@@ -378,6 +377,10 @@ static void process_send_ips(void)
 			port = htons(8080);
 			memcpy(s,&port,2); s += 2;
 		}
+		if(p->ottomila) {
+			port = htons(8000);
+			memcpy(s,&port,2); s += 2;
+		}
 		if(p->ottanta) {
 			port = htons(80);
 			memcpy(s,&port,2); s += 2;
@@ -458,16 +461,18 @@ static void process_send_ports(unsigned short *ports,int size)
 	select(left+1,&rdset,NULL,NULL,&tv);
 	exit(0);
 }
-static int alive_ips(void)
+int alive_ips(void)
 {
 	struct sockaddr_ll addr;
 	struct arp arp, *resp;
+	int len, wesd, resd;
 	struct lan *p, *q;
 	char buffer[2048];
 	struct timeval tv;
+	int index, max;
+	socklen_t size;
 	int modified;
 	fd_set rdset;
-	int len, esd;
 	time_t now;
 	int some;
 	int i;
@@ -486,96 +491,116 @@ static int alive_ips(void)
 	memcpy(addr.sll_addr,"\xFF\xFF\xFF\xFF\xFF\xFF",6);
 	memcpy(arp.eth_dst,"\x00\x00\x00\x00\x00\x00",6);
 
-	addr.sll_protocol = htons(0x806);
-	addr.sll_family   = PF_PACKET;
-	addr.sll_hatype   = 1;
-	addr.sll_halen    = ETH_ALEN;
-	addr.sll_pkttype  = PACKET_BROADCAST;
 
 	some = modified = 0;
 	resp = (struct arp *)buffer;
-	esd = socket(PF_PACKET,SOCK_RAW,htons(ETH_P_ALL));
+	wesd = socket(PF_PACKET,SOCK_RAW,htons(ETH_P_ALL));
 
-	for(i = 0,p = root_lan;p != NULL;p = p->next, i++) {
-		now = time(NULL);
-		p->todo = 0;
-		if(p->time) {
-			if(memcmp(p->mac,"\x00\x00\x00\x00\x00\x00",6) == 0) {
-				if(now - p->time < (5*60+i/10))
-					continue;
-			} else {
-				if(now - p->time < 10)
-					continue;
-				if(p->time - p->alive > 90) {
-					if(p->alive) {
-						modified = 1;
-						p->alive = 0;
-					}
-					p->tested = 0;
-				}
-			}
-		}
-		p->todo = 1;
-		p->time = now;
-		memcpy(arp.src,p->hw,6);
-		memcpy(arp.eth_src,p->hw,6);
-		memcpy(arp.ip_src,&p->local,4);
-		memcpy(arp.ip_dst,&p->ip,4);
-		addr.sll_ifindex = p->index;
+	for(i = max = 0,p = root_lan;p != NULL;p = p->next, i++)
+		if(p->index > max)
+			max = p->index;
 
-		sendto(esd,(char *)&arp,42,0,(struct sockaddr *)&addr,sizeof(addr));
+	for(index = 0;index <= max;index++) {
+		resd = socket(PF_PACKET,SOCK_DGRAM,htons(ETH_P_ALL));
 
-		delay_ms(10);
+		memset(&addr, 0, sizeof(addr));
+		addr.sll_family          = AF_PACKET;
+		addr.sll_ifindex         = index;
+		addr.sll_protocol        = htons(ETH_P_ALL);
+		bind(resd, (struct sockaddr *) &addr, sizeof(addr));
 
-		tv.tv_sec  = 0;
-		tv.tv_usec = 0;
-		FD_ZERO(&rdset);
-		FD_SET(esd,&rdset);
-		if(select(esd+1,&rdset,NULL,NULL,&tv) <= 0)
-			continue;
-		len = recvfrom(esd,(char *)resp,2048,0,NULL,NULL);
-		if(len > 42)
-			modified |= arp_response(resp);
-		some = 1;
-	}
-	if(some) {
-		for(;;) {
-			tv.tv_sec  = 0;
-			tv.tv_usec = 100*1000;
-			FD_ZERO(&rdset);
-			FD_SET(esd,&rdset);
-			if(select(esd+1,&rdset,NULL,NULL,&tv) <= 0)
-				break;
-			len = recvfrom(esd,(char *)resp,2048,0,NULL,NULL);
-			if(len > 42)
-				modified |= arp_response(resp);
-		}
-		for(p = root_lan;p != NULL;p = p->next) {
-			if(!p->todo)
+		addr.sll_protocol = htons(0x806);
+		addr.sll_family   = PF_PACKET;
+		addr.sll_hatype   = 1;
+		addr.sll_halen    = ETH_ALEN;
+		addr.sll_pkttype  = PACKET_BROADCAST;
+
+		for(i = 0,p = root_lan;p != NULL;p = p->next, i++) {
+			if(p->index != index)
 				continue;
 			now = time(NULL);
+			p->todo = 0;
+			if(p->time) {
+				if(memcmp(p->mac,"\x00\x00\x00\x00\x00\x00",6) == 0) {
+					if(now - p->time < (5*60+i/10))
+						continue;
+				} else {
+					if(now - p->time < 10)
+						continue;
+					if(p->time - p->alive > 90) {
+						if(p->alive) {
+							modified = 1;
+							p->alive = 0;
+						}
+						p->tested = 0;
+					}
+				}
+			}
+			p->todo = 1;
 			p->time = now;
 			memcpy(arp.src,p->hw,6);
 			memcpy(arp.eth_src,p->hw,6);
 			memcpy(arp.ip_src,&p->local,4);
 			memcpy(arp.ip_dst,&p->ip,4);
 			addr.sll_ifindex = p->index;
-			sendto(esd,(char *)&arp,42,0,(struct sockaddr *)&addr,sizeof(addr));
+
+			sendto(wesd,(char *)&arp,42,0,(struct sockaddr *)&addr,sizeof(addr));
+
 			delay_ms(10);
-		}
-		for(;;) {
+
 			tv.tv_sec  = 0;
-			tv.tv_usec = 100*1000;
+			tv.tv_usec = 0;
 			FD_ZERO(&rdset);
-			FD_SET(esd,&rdset);
-			if(select(esd+1,&rdset,NULL,NULL,&tv) <= 0)
-				break;
-			len = recvfrom(esd,(char *)resp,2048,0,NULL,NULL);
-			if(len > 42)
+			FD_SET(resd,&rdset);
+			if(select(resd+1,&rdset,NULL,NULL,&tv) <= 0)
+				continue;
+			size = sizeof(addr);
+			len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
+			if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
 				modified |= arp_response(resp);
+			some = 1;
+		}
+		if(some) {
+			for(;;) {
+				tv.tv_sec  = 0;
+				tv.tv_usec = 100*1000;
+				FD_ZERO(&rdset);
+				FD_SET(resd,&rdset);
+				if(select(resd+1,&rdset,NULL,NULL,&tv) <= 0)
+					break;
+				size = sizeof(addr);
+				len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
+				if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
+					modified |= arp_response(resp);
+			}
+			for(p = root_lan;p != NULL;p = p->next) {
+				if(!p->todo)
+					continue;
+				now = time(NULL);
+				p->time = now;
+				memcpy(arp.src,p->hw,6);
+				memcpy(arp.eth_src,p->hw,6);
+				memcpy(arp.ip_src,&p->local,4);
+				memcpy(arp.ip_dst,&p->ip,4);
+				addr.sll_ifindex = p->index;
+				sendto(wesd,(char *)&arp,42,0,(struct sockaddr *)&addr,sizeof(addr));
+				delay_ms(10);
+			}
+			for(;;) {
+				tv.tv_sec  = 0;
+				tv.tv_usec = 100*1000;
+				FD_ZERO(&rdset);
+				FD_SET(resd,&rdset);
+				if(select(resd+1,&rdset,NULL,NULL,&tv) <= 0)
+					break;
+				size = sizeof(addr);
+				len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
+				if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
+					modified |= arp_response(resp);
+			}
 		}
 	}
-	close(esd);
+	close(wesd);
 	for(p = root_lan;p != NULL;p = p->next) {
 		if(memcmp(p->mac,"\x00\x00\x00\x00\x00\x00",6) == 0)
 			continue;
@@ -592,6 +617,11 @@ static int alive_ips(void)
 				test = test_http(p->ip,htons(8080));
 				if(test != p->ottantaottanta) {
 					p->ottantaottanta = test;
+					modified = 1;
+				}
+				test = test_http(p->ip,htons(8000));
+				if(test != p->ottomila) {
+					p->ottomila = test;
 					modified = 1;
 				}
 				p->alive = p->tested = now;

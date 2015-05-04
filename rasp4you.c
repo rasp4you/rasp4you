@@ -153,6 +153,30 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 	if(connect(right,(struct sockaddr *)&from,sizeof(from)) < 0) {
 		not_connected = 1;
 		right_count = -1;
+		for(i = 0;i <= 16;i++) {
+			if(!local_addresses[i])
+				break;
+			if(from.sin_addr.s_addr == local_addresses[i])
+				break;
+		}
+		if(local_addresses[i]) {
+			int j;
+
+			for(j = 0;j <= 16;j++) {
+				if(!local_addresses[j])
+					break;
+				if(i == j)
+					continue;
+				close(right);
+				right = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+				from.sin_addr.s_addr = local_addresses[j];
+				if(connect(right,(struct sockaddr *)&from,sizeof(from)) >= 0) {
+					not_connected = 0;
+					right_count = 0;
+					break;
+				}
+			}
+		}
 	} else {
 		not_connected = 0;
 		right_count = 0;
@@ -289,6 +313,8 @@ initialize:
 		strcpy(s,key);
 	} else {
 		sprintf(buf,"REGISTER|%x|%x|%d.%d",serial,ip,release,build);
+		//if(raspberry_id != NULL)
+			//sprintf(buf+strlen(buf),"|%s",raspberry_id);
 		create_secret(secret,serial,key,buf);
 		sprintf(buf+strlen(buf),"?%s",secret);
 	}
@@ -387,7 +413,7 @@ static void get_local_addresses(void)
 	char buf[4096];
 	char hw[6];
 
-	LOCAL_ADDR = 0;
+	n = LOCAL_ADDR = 0;
 	ifc.ifc_len = 4096;
 	ifc.ifc_ifcu.ifcu_buf = buf;
 	sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -404,22 +430,30 @@ static void get_local_addresses(void)
 		if(ifr.ifr_flags & IFF_LOOPBACK)
 			continue;
 		ioctl(sd,SIOCGIFADDR,&ifr);
-		local = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
-		if(strcmp(ifp->ifr_name,"eth0") == 0)
-			LOCAL_ADDR = local;
-		else if(!LOCAL_ADDR)
-			LOCAL_ADDR = local;
+		local_addresses[n++] = local = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
 		ioctl(sd,SIOCGIFINDEX,&ifr);
 		index = ifr.ifr_ifindex;
 		ioctl(sd,SIOCGIFHWADDR,&ifr);
 		memcpy(hw,ifr.ifr_hwaddr.sa_data,6);
-		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
 		ioctl(sd,SIOCGIFBRDADDR,&ifr);
 		brd = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
 		ioctl(sd,SIOCGIFNETMASK,&ifr);
 		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
-		ioctl(sd,SIOCGIFNETMASK,&ifr);
-		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
+		if((local & ~mask) == (router & ~mask))
+			LOCAL_ADDR = local;
+		if(!LOCAL_ADDR) {
+			if(strcmp(ifp->ifr_name,"eth0") == 0)
+				LOCAL_ADDR = local;
+			else if(!LOCAL_ADDR)
+				LOCAL_ADDR = local;
+		}
+
+
+		mask |= 0xFFFFFF;
 		n = ~mask;
 		n = ntohl(n);
 		for(i = n;i >= 0;i--) {
@@ -492,7 +526,6 @@ static void connect_to_server(struct hostent *h)
 	int on, fd;
 	int ret;
 
-	get_router();
 
 	server_tcp.sin_family = AF_INET;
 	server_tcp.sin_port   = htons(SNAT_PORT);
@@ -710,10 +743,13 @@ static void main_loop(struct hostent *h)
 			sendto(sd_7766,rxbuf,strlen(rxbuf)+1,0,(struct sockaddr *)&server_udp,sizeof(server_udp));
 			continue;
 		}
-		if(strncmp(rxbuf,"ACK|",4) == 0) {
+		if(strncmp(rxbuf,"ACK|",4) == 0 || strncmp(rxbuf,"KCA|",4) == 0) {
 			int status, quality, todo;
 			char *name, *s;
+			int cloned;
 
+
+			cloned = strncmp(rxbuf,"KCA|",4) == 0;
 
 			if(was_unreach) {
 				if(pid_scan > 0) {
@@ -765,8 +801,10 @@ static void main_loop(struct hostent *h)
 						sprintf(msg,"%s.%s is waiting %s for free %s or pay now at https://%s",name,RASP4YOU,rxbuf,txbuf,PAYSITE);
 					else if(paidtime)
 						sprintf(msg,"%s.%s is available for %s",name,RASP4YOU,rxbuf);
-					else
+					else if(!cloned)
 						sprintf(msg,"%s.%s is available",name,RASP4YOU);
+					else
+						sprintf(msg,"%s.%s is cloned. Repeat installation",name,RASP4YOU);
 				} else 
 					sprintf(msg,"Please check your ADSL because quality %d%% is low !",quality);
 				write_on_console(msg);
@@ -950,6 +988,7 @@ int main(int argc,char **argv)
 		write_on_console(msg);
 		sleep(10);
 	}
+	get_router();
 	get_local_addresses();
 	connect_to_server(h);
 	main_loop(h);

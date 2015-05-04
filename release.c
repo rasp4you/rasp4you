@@ -6,4 +6,4 @@ int arch = LINUX_64_BIT;
 int arch = RASPBIAN;
 #endif
 int release = 1;
-int build = 6;
+int build = 7;
