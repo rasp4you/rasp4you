@@ -83,6 +83,7 @@ struct old_lan {
 extern struct sockaddr_in server_tcp;
 extern struct sockaddr_in server_udp;
 extern char key[];
+extern char yek[];
 extern char *raspberry_id;
 extern unsigned short LOCAL_PORT, REMOTE_PORT;
 extern struct lan *root_lan;

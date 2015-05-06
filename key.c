@@ -30,13 +30,14 @@
 
 #include "rasp4you.h"
 
-static unsigned char marker[65+4] = "rasp4you for udp  channel  ready";
+static unsigned char marker[65+4+32] = "rasp4you for udp  channel  ready";
 static char *keybin;
 
 char *machine_id;
 unsigned serial;
 //char *raspberry_id;
 char key[65];
+char yek[65];
 
 int get_machine_id(void)
 {
@@ -100,33 +101,29 @@ static void do_key()
 		sprintf(t,"%02x",n);
 		t += 2;
 	}
+	k += 4;
+	t = yek;
+	for(i = 0;i < 32;i++) {
+		unsigned n = *k++;
+		sprintf(t,"%02x",n);
+		t += 2;
+	}
 }
 void make_key(void)
 {
-	struct timespec tv;
-	unsigned *q, *p;
-	char buf[1024];
-	pid_t pid;
-	time_t t;
-	char *s;
-	int i;
+	unsigned char *s;
+	int i, fd, n;
 
-	s = buf;
-	strcpy(buf,machine_id);
-	s = buf + strlen(buf);
-	t = time(NULL);
-	memcpy(s,&t,sizeof(t)); s += sizeof(t);
-	memcpy(s,&pid,sizeof(pid_t)); s += sizeof(pid_t);
-
-	p = (unsigned *)buf;
-	q = (unsigned *)&marker[LENMARK];
-	for(i = 0;i < 1024/4;) {
-		*q++ += *p++;
-		if((++i & 7) == 0)
-			q = (unsigned *)&marker[LENMARK];
+	s = &marker[LENMARK];
+	fd = open("/dev/random",O_RDONLY);
+	for(i = 32;i > 0;s += n, i -= n) {
+		n = read(fd,s,i);
+		if(n <= 0)
+			break;
 	}
+	close(fd);
 	if(marker[LENMARK] == 0)
-		marker[LENMARK] = tv.tv_sec;
+		marker[LENMARK] = 0xFF;
 	keybin = (char *)&marker[LENMARK];
 	do_key();
 }
@@ -156,7 +153,7 @@ int check_key(void)
 #endif
 	keybin = (char *)&marker[LENMARK];
 	memcpy(&serial,keybin + LENKEY,4);
-	keybin[LENKEY] = 0;
+	//keybin[LENKEY] = 0;
 	if(*keybin == 0)
 		return checked = 0;
 	do_key();
@@ -191,7 +188,10 @@ void install_exe(char *name)
 	unsigned char *t, *s;
 	int found, n, size;
 	int fdin, fdout;
+	char yekbin[33];
 	char buf[2048];
+	int written;
+	unsigned u;
 
 	size = found = 0;
 	fdin = open(name,O_RDONLY);
@@ -200,6 +200,11 @@ void install_exe(char *name)
 		fprintf(stderr,"Panic create %s\n",EXE_TMP_FILE);
 		exit(1);
 	}
+	for(n = 0;n < 32;n++) {
+		sscanf(&yek[n*2],"%2x",&u);
+		yekbin[n] = u;
+	}
+	written = 0;
 	for(;;) {
 		n = read(fdin,buf+size,1024);
 		if(n <= 0) {
@@ -208,6 +213,11 @@ void install_exe(char *name)
 			break;
 		}
 		size += n;
+		if(written) {
+			write(fdout,buf,size);
+			size = 0;
+			continue;
+		}
 
 		found = 0;
 		t = marker;
@@ -227,13 +237,13 @@ void install_exe(char *name)
 			continue;
 		}
 		if(found == LENMARK) {
-			n = read(fdin,buf+size,LENKEY+4);
+			n = read(fdin,buf+size,LENKEY+4+LENKEY);
 			size += n;
 			memcpy(s,keybin,LENKEY);
 			memcpy(s + LENKEY,&serial,4);
+			memcpy(s + LENKEY + 4,yekbin,LENKEY);
 			write(fdout,buf,size);
-			s[LENKEY] = 0;
-			found = 1;
+			written = 1;
 			size = 0;
 		} else {
 			size -= found;

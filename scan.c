@@ -299,6 +299,7 @@ static void process_send_ips(void)
 	int alive, death;
 	char secret[128];
 	char *s, *init;
+	//int option = 0;
 	char buf[512];
 	fd_set rdset;
 	unsigned now;
@@ -408,6 +409,7 @@ static void process_send_ips(void)
 	FD_ZERO(&rdset);
 	FD_SET(left,&rdset);
 	select(left+1,&rdset,NULL,NULL,&tv);
+	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 	exit(0);
 }
 static void process_send_ports(unsigned short *ports,int size)
@@ -416,6 +418,7 @@ static void process_send_ports(unsigned short *ports,int size)
 	unsigned short *v, *q, *new, *p;
 	struct timeval tv;
 	char secret[128];
+	//int option = 0;
 	fd_set rdset;
 	char buf[512];
 	int left;
@@ -459,6 +462,7 @@ static void process_send_ports(unsigned short *ports,int size)
 	FD_ZERO(&rdset);
 	FD_SET(left,&rdset);
 	select(left+1,&rdset,NULL,NULL,&tv);
+	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 	exit(0);
 }
 int alive_ips(void)
@@ -608,6 +612,7 @@ int alive_ips(void)
 					modified |= arp_response(resp);
 			}
 		}
+		close(resd);
 	}
 	close(wesd);
 	for(p = root_lan;p != NULL;p = p->next) {

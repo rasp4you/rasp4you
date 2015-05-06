@@ -75,6 +75,7 @@ static void receive_firmware(char *left_buf)
 {
 	int left, fd, n, len;
 	char secret[512];
+	//int option = 0;
 
 	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0)
@@ -86,6 +87,7 @@ static void receive_firmware(char *left_buf)
 	write(left,left_buf,strlen(left_buf)+1);
 
 	if(!readstring(left,left_buf,1024) || sscanf(left_buf,"FIRMWARE|%d",&len) != 1) {
+		//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 		close(left);
 		return;
 	}
@@ -98,6 +100,7 @@ static void receive_firmware(char *left_buf)
 			break;
 		len -= n;
 	}
+	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 	close(left);
 	close(fd);
 	if(len > 0) {
@@ -114,10 +117,12 @@ static void receive_firmware(char *left_buf)
 static void process_tcp(char *header,unsigned ip,unsigned short port)
 {
 	int left, right, left_count, right_count;
-	char *left_buf, *right_buf;
+	char *left_buf, *right_buf, *s;
 	struct sockaddr_in from;
 	fd_set rdset, wrset;
 	int not_connected;
+	char secret[128];
+	//int option = 0;
 	socklen_t len;
 	int status;
 	pid_t pid;
@@ -130,6 +135,10 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 	}
 	if(fork() != 0)
 		exit(0);
+
+	s = strchr(header,'?'); *s = 0;
+	create_secret(secret,serial,key,header);
+	sprintf(header+strlen(header),"?%s",secret);
 
 	for(i = 0;i < 1024;i++)
 		close(i);
@@ -183,6 +192,8 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 	}
 	if(right_count < 0)
 		gracefulshut(left);
+
+
 	write(left,header,strlen(header)+1);
 
 	if(strncmp(header,"GET / HTTP/1",12) != 0) {
@@ -245,6 +256,8 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 				right_count = 0;
 		}
 	}
+	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
+	//setsockopt(right,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 	exit(0);
 }
 static void read_email_address(char *s,int n)
@@ -356,15 +369,23 @@ initialize:
 		fflush(stdout);
 		goto initialize;
 	}
-	s = skip(buf,6);
-	if(s == NULL) {
-		if(iam_a_daemon) {
-			return -1;
+	s = skip(buf,7);
+	if(s != NULL) {
+		strcpy(email,s);
+		*(s-1) = 0;
+		s = skip(buf,6);
+		strcpy(yek,s);
+	} else {
+		s = skip(buf,6);
+		if(s == NULL) {
+			if(iam_a_daemon) {
+				return -1;
+			}
+			fprintf(stderr,"Communication error with %s\n",RASP4YOU);
+			exit(1);
 		}
-		fprintf(stderr,"Communication error with %s\n",RASP4YOU);
-		exit(1);
+		strcpy(email,s);
 	}
-	strcpy(email,s);
 	if(size > 0) {
 		struct old_lan *q;
 		char *tmp, *s;
@@ -443,7 +464,7 @@ static void get_local_addresses(void)
 		ioctl(sd,SIOCGIFNETMASK,&ifr);
 		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
 
-		if((local & ~mask) == (router & ~mask))
+		if((local & mask) == (router & mask))
 			LOCAL_ADDR = local;
 		if(!LOCAL_ADDR) {
 			if(strcmp(ifp->ifr_name,"eth0") == 0)
@@ -520,8 +541,9 @@ static void connect_to_server(struct hostent *h)
 {
 	struct sockaddr_in from;
 	struct timeval tv;
-	char msg[128];
+	//int option = 0;
 	socklen_t len;
+	char msg[128];
 	fd_set rdset;
 	int on, fd;
 	int ret;
@@ -568,6 +590,7 @@ again:
 	len = sizeof(from);
 	getsockname(fd,(struct sockaddr *)&from,&len);
 	ret = register_machine(fd,LOCAL_ADDR);
+	//setsockopt(fd,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 	if(ret <= 0) {
 		close(fd);
 		if(ret < 0)
@@ -599,6 +622,7 @@ again:
 				server_tcp.sin_addr.s_addr = *((unsigned *)h->h_addr);
 			}
 		}
+		//setsockopt(fd,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
 		close(fd);
 	}
 	from.sin_family      = AF_INET;
@@ -724,7 +748,7 @@ static void main_loop(struct hostent *h)
 		if(strncmp(rxbuf,"REG|",4) == 0) {
 			if(sscanf(rxbuf+4,"%x",&SERIAL) != 1)
 				continue;
-			if(serial != SERIAL || !check_secret(serial,key,rxbuf))
+			if(serial != SERIAL || !check_secret(serial,yek,rxbuf))
 				continue;
 			sprintf(rxbuf,"REG|%08x",serial);
 			create_secret(secret,serial,key,rxbuf);
@@ -735,7 +759,7 @@ static void main_loop(struct hostent *h)
 		if(strncmp(rxbuf,"GER|",4) == 0) {
 			if(sscanf(rxbuf+4,"%x",&SERIAL) != 1)
 				continue;
-			if(serial != SERIAL || !check_secret(serial,key,rxbuf))
+			if(serial != SERIAL || !check_secret(serial,yek,rxbuf))
 				continue;
 			sprintf(rxbuf,"GER|%08x",serial);
 			create_secret(secret,serial,key,rxbuf);
@@ -768,7 +792,7 @@ static void main_loop(struct hostent *h)
 			name = skip(rxbuf,8);
 			if(name == NULL)
 				continue;
-			if(serial != SERIAL || !check_secret(serial,key,rxbuf))
+			if(serial != SERIAL || !check_secret(serial,yek,rxbuf))
 				continue;
 			s = strchr(name,'?');
 			if(s != NULL)
@@ -796,15 +820,15 @@ static void main_loop(struct hostent *h)
 					}
 					first_time = 0;
 				}
-				if(quality >= 90) {
+				if(cloned)
+					sprintf(msg,"%s.%s is cloned. Repeat installation",name,RASP4YOU);
+				else if(quality >= 90) {
 					if(freetime)
 						sprintf(msg,"%s.%s is waiting %s for free %s or pay now at https://%s",name,RASP4YOU,rxbuf,txbuf,PAYSITE);
 					else if(paidtime)
 						sprintf(msg,"%s.%s is available for %s",name,RASP4YOU,rxbuf);
-					else if(!cloned)
-						sprintf(msg,"%s.%s is available",name,RASP4YOU);
 					else
-						sprintf(msg,"%s.%s is cloned. Repeat installation",name,RASP4YOU);
+						sprintf(msg,"%s.%s is available",name,RASP4YOU);
 				} else 
 					sprintf(msg,"Please check your ADSL because quality %d%% is low !",quality);
 				write_on_console(msg);
@@ -879,7 +903,7 @@ static void main_loop(struct hostent *h)
 
 			if(sscanf(rxbuf+4,"%x|%x.%hx<-",&SERIAL,&ip,&port) != 3)
 				continue;
-			if(serial == SERIAL && check_secret(serial,key,rxbuf))
+			if(serial == SERIAL && check_secret(serial,yek,rxbuf))
 				process_tcp(rxbuf,ip,port);
 			continue;
 		}
@@ -893,7 +917,7 @@ static void main_loop(struct hostent *h)
 			if(s == NULL)
 				continue;
 			*(s-1) = 0;
-			if(serial != SERIAL || !check_secret(serial,key,rxbuf))
+			if(serial != SERIAL || !check_secret(serial,yek,rxbuf))
 				continue;
 			*(s-1) = '|';
 			for(u = root_udp_request;u != NULL;u = u->next)
