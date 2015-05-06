@@ -222,6 +222,8 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 			if(right > max)
 				max = right;
 		}
+		if(max == 0)
+			break;
 		if(select(max+1,&rdset,&wrset,NULL,NULL) <= 0)
 			continue;
 		if(FD_ISSET(left,&rdset)) {
