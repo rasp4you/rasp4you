@@ -32,3 +32,15 @@ http://livingroom.farrel.rasp4you.com:8080 (ip camera on 8080 port)
 http://kitchen.farrel.rasp4you.com (another ip camera)
 
 and so your home is  "clouded".
+
+Local DNS Support
+
+You can access to any machine using local subdomain (... rasp4me.com) 
+
+farrel.rasp4me.com
+
+router.farrel.rasp4me.com
+
+garage.farrel.rasp4me.com
+
+kitchen.farrel.rasp4me.com
