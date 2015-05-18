@@ -14,6 +14,7 @@
 #include <sys/errno.h>
 #include <linux/sockios.h>
 #include <sys/wait.h>
+#include <pthread.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -30,13 +31,172 @@
 
 #include "rasp4you.h"
 
+static pthread_mutex_t mutex_ports;
+static pthread_cond_t condition_ports;
+static pthread_mutex_t mutex_ips;
+static pthread_cond_t condition_ips;
+
+static unsigned short *ports;
+static int ports_size;
+
+struct sockaddr_in server_tcp;
+struct sockaddr_in server_udp;
 unsigned LOCAL_ADDR;
+unsigned short LOCAL_PORT, REMOTE_PORT;
 unsigned local_addresses[17];
 unsigned router;
 
 struct lan *root_lan;
+volatile int restart_scan;
+
+volatile int ips_in_progress;
+volatile int ports_in_progress;
+
+static char *skip_blank(char *s)
+{
+        while(*s == ' ' || *s == '\t')
+                s++;
+        return s;
+}
+static char *skip_to_blank(char *s)
+{
+        while(*s != ' ' && *s != '\t' && *s)
+                s++;
+        return s;
+}
+static void ips_sleep(void)
+{
+        pthread_mutex_lock(&mutex_ips);
+	if(ips_in_progress)
+        	pthread_cond_wait(&condition_ips,&mutex_ips);
+        pthread_mutex_unlock(&mutex_ips);
+}
+static void ips_wakeup(void)
+{
+        pthread_mutex_lock(&mutex_ips);
+	ips_in_progress = 0;
+        pthread_cond_signal(&condition_ips);
+        pthread_mutex_unlock(&mutex_ips);
+}
+static void ports_sleep(void)
+{
+        pthread_mutex_lock(&mutex_ports);
+	if(ports_in_progress)
+        	pthread_cond_wait(&condition_ports,&mutex_ports);
+        pthread_mutex_unlock(&mutex_ports);
+}
+static void ports_wakeup(void)
+{
+        pthread_mutex_lock(&mutex_ports);
+	ports_in_progress = 0;
+        pthread_cond_signal(&condition_ports);
+        pthread_mutex_unlock(&mutex_ports);
+}
+void get_local_addresses(void)
+{
+	unsigned ip, mask, brd, local;
+	int j, size, i, n;
+	struct ifreq *ifp;
+	struct ifconf ifc;
+	struct ifreq ifr;
+	int sd, index;
+	struct lan *p;
+	char buf[4096];
+	char hw[6];
+
+	n = LOCAL_ADDR = 0;
+	ifc.ifc_len = 4096;
+	ifc.ifc_ifcu.ifcu_buf = buf;
+	sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	ioctl(sd, SIOCGIFCONF, &ifc);
+	size = ifc.ifc_len / sizeof(struct ifreq);
+	for (j = 0; j < size; j++) {
+		ifp = &ifc.ifc_ifcu.ifcu_req[j];
+		if(ifp->ifr_addr.sa_family != AF_INET)
+			continue;
+		strcpy(ifr.ifr_name,ifp->ifr_name);
+		ioctl(sd,SIOCGIFFLAGS,&ifr);
+		if(!(ifr.ifr_flags & IFF_UP))
+			continue;
+		if(ifr.ifr_flags & IFF_LOOPBACK)
+			continue;
+		ioctl(sd,SIOCGIFADDR,&ifr);
+		local_addresses[n++] = local = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
+		ioctl(sd,SIOCGIFINDEX,&ifr);
+		index = ifr.ifr_ifindex;
+		ioctl(sd,SIOCGIFHWADDR,&ifr);
+		memcpy(hw,ifr.ifr_hwaddr.sa_data,6);
+
+		ioctl(sd,SIOCGIFBRDADDR,&ifr);
+		brd = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
+		ioctl(sd,SIOCGIFNETMASK,&ifr);
+		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
+
+		if((local & mask) == (router & mask))
+			LOCAL_ADDR = local;
+		if(!LOCAL_ADDR) {
+			if(strcmp(ifp->ifr_name,"eth0") == 0)
+				LOCAL_ADDR = local;
+			else if(!LOCAL_ADDR)
+				LOCAL_ADDR = local;
+		}
 
 
+		mask |= 0xFFFFFF;
+		n = ~mask;
+		n = ntohl(n);
+		for(i = n;i >= 0;i--) {
+			ip = (local & mask) | htonl(i);
+			if(brd == ip)
+				continue;
+			for(p = root_lan;p != NULL;p = p->next)
+				if(p->ip == ip)
+					break;
+			if(p != NULL)
+				continue;
+			p = calloc(1,sizeof(struct lan));
+			p->local  = local;
+			p->index  = index;
+			p->ip     = ip;
+			memcpy(p->hw,hw,6);
+			p->next = root_lan;
+			root_lan = p;
+		}
+	}
+	close(sd);
+}
+void get_router(void)
+{
+	unsigned ip, flags;
+	char buf[512];
+	FILE *fp;
+	char *s;
+
+	fp = fopen("/proc/net/route","r");
+	while(fgets(buf,512,fp) != NULL) {
+		s = skip_to_blank(buf);
+		s = skip_blank(s);
+		if(!isxdigit(*s))
+			continue;
+		if(strncmp(s,"00000000",8))
+			continue;
+		s = skip_to_blank(s);
+		s = skip_blank(s);
+		if(sscanf(s,"%x",&ip) != 1)
+			continue;
+		s = skip_to_blank(s);
+		s = skip_blank(s);
+		if(sscanf(s,"%x",&flags) != 1)
+			continue;
+		if(flags & 3) {
+			router = ip;
+			break;
+		}
+	}
+	fclose(fp);
+}
 void gracefulshut(int handle)
 {
 	struct timeval tv;
@@ -52,6 +212,19 @@ void gracefulshut(int handle)
 	}
 	shutdown(handle,SHUT_WR);
 }
+static void gracefulclose(int left)
+{
+	struct timeval tv;
+	fd_set rdset;
+
+	gracefulshut(left);
+	tv.tv_usec = 0;
+	tv.tv_sec = 1;
+	FD_ZERO(&rdset);
+	FD_SET(left,&rdset);
+	select(left+1,&rdset,NULL,NULL,&tv);
+	close(left);
+}
 static void delay_ms(int ms)
 {
 	struct timeval tv;
@@ -60,7 +233,7 @@ static void delay_ms(int ms)
 	tv.tv_usec = ms * 1000;
 	select(0,NULL,NULL,NULL,&tv);
 }
-static int arp_response(struct arp *resp)
+static int arp_response(struct arp *resp,int log)
 {
 	struct lan *p;
 	time_t now;
@@ -74,10 +247,13 @@ static int arp_response(struct arp *resp)
 	for(p = root_lan;p != NULL;p = p->next) {
 		if(memcmp(&p->ip,resp->ip_src,4) == 0) {
 			if(!p->alive || memcmp(p->mac,resp->eth_src,6)) {
+				if(log)
+					printf("Now alive %s\n",inet_ntoa(*((struct in_addr *)&p->ip)));
 				memcpy(p->mac,resp->eth_src,6);
 				p->tested = 0;
 				ret = 1;
-			}
+			} else if(log)
+				printf("Still alive %s\n",inet_ntoa(*((struct in_addr *)&p->ip)));
 			p->last_contacted = now;
 			p->alive = now;
 			p->todo = 0;
@@ -240,7 +416,7 @@ static unsigned short *sort(unsigned short *q)
 	}
 	return q+1;
 }
-static int test_http(unsigned ip,unsigned short port)
+static int test_http(unsigned ip,unsigned short port,int local)
 {
 	struct sockaddr_in from;
 	struct timeval tv;
@@ -261,8 +437,11 @@ static int test_http(unsigned ip,unsigned short port)
 			close(fd);
 			return 0;
 		}
-		tv.tv_sec = 0;
-		tv.tv_usec = 1000*1000;
+		if(local)
+			tv.tv_sec = 2;
+		else
+			tv.tv_sec = 1;
+		tv.tv_usec = 0;
 		FD_ZERO(&rdset);
 		FD_SET(fd,&rdset);
 		if(select(fd+1,NULL,&rdset,NULL,&tv) <= 0) {
@@ -270,11 +449,18 @@ static int test_http(unsigned ip,unsigned short port)
 			return 0;
 		}
 	}
-	tv.tv_sec  = 0;
-	tv.tv_usec = 1000*200;
 	FD_ZERO(&rdset);
 	FD_SET(fd,&rdset);
-	write(fd,TEST_HTTP,strlen(TEST_HTTP));
+	if(local) {
+		tv.tv_sec  = 2;
+		tv.tv_usec = 0;
+		write(fd,TEST_HTTP_LOCAL,strlen(TEST_HTTP_LOCAL));
+	} else {
+		tv.tv_sec  = 0;
+		tv.tv_usec = 1000*200;
+					//printf("Test %s\n",inet_ntoa(*((struct in_addr *)&ip)));
+		write(fd,TEST_HTTP,strlen(TEST_HTTP));
+	}
 
 	on = 0;
 	fcntl(fd,FIONBIO,&on);
@@ -283,30 +469,36 @@ static int test_http(unsigned ip,unsigned short port)
 		int n = read(fd,buf,511);
 		if(n > 0) {
 			buf[n] = 0;
-			if(strncmp(buf,"HTTP/1",6) == 0) {
+			if(strncmp(buf,"HTTP/1",6) == 0)
 				ret = 1;
+			else if(strncmp(buf,"PTTH/1",6) == 0) {
+				ret = 2;
 			}
 		}
 	}
 	close(fd);
 	return ret;
 }
-static void process_send_ips(void)
+static void *process_send_ips(void * param)
 {
 	struct lan *p, **q, **best, *ordered;
 	unsigned short port;
-	struct timeval tv;
 	int alive, death;
 	char secret[128];
 	char *s, *init;
 	//int option = 0;
 	char buf[512];
-	fd_set rdset;
 	unsigned now;
 	int total;
 	int left;
 	int size;
 
+	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0) {
+		close(left);
+		ips_wakeup();
+		return NULL;
+	}
 	alive = death = 0;
 	ordered = NULL;
      	for(q = &root_lan;*q != NULL;q = &root_lan) {
@@ -340,7 +532,7 @@ static void process_send_ips(void)
 			death = 256 - alive;
 	}
 		
-	size = 0;
+	size = alive + death;
 	now = time(NULL);
 	root_lan = ordered;
 	init = s = malloc(size * (6+4+4+2+2+2+2));
@@ -374,6 +566,10 @@ static void process_send_ips(void)
 			flag |= 2;
 		flag = htons(flag);
 		memcpy(s,&flag,2); s += 2;
+		if(p->novemila) {
+			port = htons(9000);
+			memcpy(s,&port,2); s += 2;
+		}
 		if(p->ottantaottanta) {
 			port = htons(8080);
 			memcpy(s,&port,2); s += 2;
@@ -391,9 +587,6 @@ static void process_send_ips(void)
 		size++;
 		s += 2;
 	}
-	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0)
-		exit(0);
 	total = size;
 	size = s - init;
 	sprintf(buf,"IPS|%x|%d|%d",serial,total,size);
@@ -403,37 +596,50 @@ static void process_send_ips(void)
 	write(left,buf,strlen(buf) + 1);
 	write(left,init,size);
 
-	gracefulshut(left);
-	tv.tv_usec = 0;
-	tv.tv_sec = 1;
-	FD_ZERO(&rdset);
-	FD_SET(left,&rdset);
-	select(left+1,&rdset,NULL,NULL,&tv);
-	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
-	exit(0);
+	free(init);
+
+	gracefulclose(left);
+
+	ips_wakeup();
+	return NULL;
 }
-static void process_send_ports(unsigned short *ports,int size)
+static void *process_send_ports(void * param)
 {
-
-	unsigned short *v, *q, *new, *p;
-	struct timeval tv;
+	unsigned short *v, *q, *new, *p, *tmp, *vchiq, *vc;
 	char secret[128];
-	//int option = 0;
-	fd_set rdset;
 	char buf[512];
+	int size;
 	int left;
+	int ret;
 
+	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0) {
+		close(left);
+		ports_wakeup();
+		return NULL;
+	}
+	size = ports_size;
 	size += sizeof(unsigned short);
-	q = new = calloc(1,size);
-	for(p = ports;*p != 0;) {
-		if(test_http(LOCAL_ADDR,*p)) {
+	q = new = calloc(1,size * 2);
+	tmp = calloc(1,size);
+	memcpy(tmp,ports,size);
+
+	vchiq = vc = calloc(1,size);
+
+	for(p = tmp;*p != 0;) {
+		ret = test_http(LOCAL_ADDR,*p,1);
+		if(ret) {
 			*q++ = *p;
+			if(ret == 2)
+				*vc++ = *p;
 			*p++ = 0;
 		} else
 			p++;
 	}
+	*vc = 0;
+
 	*q++ = 0;
-	for(v = ports;v < p;v++)
+	for(v = tmp;v < p;v++)
 		if(*v)
 			*q++ = *v;
 	*q++ = 0;
@@ -444,11 +650,15 @@ static void process_send_ports(unsigned short *ports,int size)
 
 	q = sort(new);
 	q = sort(q);
-	q = sort(q);
+	v = q = sort(q);
 
-	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0)
-		exit(0);
+	for(vc = vchiq;*vc;) {
+		size += sizeof(unsigned short);
+		*v++ = *vc++;
+	}
+	*v = 0;
+	sort(q);
+
 	sprintf(buf,"PORTS|%x|%d",serial,size);
 	create_secret(secret,serial,key,buf);
 	sprintf(buf+strlen(buf),"?%s",secret);
@@ -456,16 +666,16 @@ static void process_send_ports(unsigned short *ports,int size)
 	write(left,buf,strlen(buf) + 1);
 	write(left,new,size);
 
-	gracefulshut(left);
-	tv.tv_usec = 0;
-	tv.tv_sec = 1;
-	FD_ZERO(&rdset);
-	FD_SET(left,&rdset);
-	select(left+1,&rdset,NULL,NULL,&tv);
-	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
-	exit(0);
+	free(vchiq);
+	free(new);
+	free(tmp);
+
+	gracefulclose(left);
+
+	ports_wakeup();
+	return NULL;
 }
-int alive_ips(void)
+int alive_ips(int timescan,int log)
 {
 	struct sockaddr_ll addr;
 	struct arp arp, *resp;
@@ -538,15 +748,19 @@ int alive_ips(void)
 					if(now - p->time < (5*60+i/10))
 						continue;
 				} else {
-					if(now - p->time < 10)
+					if(now - p->time < timescan)
 						continue;
 					if(p->time - p->alive > 90) {
 						if(p->alive) {
+							if(log)
+								printf("Now dead %s\n",inet_ntoa(*((struct in_addr *)&p->ip)));
 							modified = 1;
 							p->alive = 0;
-						}
+						} else if(log)
+							printf("Test but not responding %s\n",inet_ntoa(*((struct in_addr *)&p->ip)));
 						p->tested = 0;
-					}
+					} else if(log)
+						printf("Test %s\n",inet_ntoa(*((struct in_addr *)&p->ip)));
 				}
 			}
 			p->todo = 1;
@@ -570,7 +784,7 @@ int alive_ips(void)
 			size = sizeof(addr);
 			len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
 			if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
-				modified |= arp_response(resp);
+				modified |= arp_response(resp,log);
 			some = 1;
 		}
 		if(some) {
@@ -584,7 +798,7 @@ int alive_ips(void)
 				size = sizeof(addr);
 				len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
 				if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
-					modified |= arp_response(resp);
+					modified |= arp_response(resp,log);
 			}
 			for(p = root_lan;p != NULL;p = p->next) {
 				if(!p->todo)
@@ -609,7 +823,7 @@ int alive_ips(void)
 				size = sizeof(addr);
 				len = recvfrom(resd,(char *)resp,2048,0,(struct sockaddr *)&addr,&size);
 				if(len > 0 && ntohs(addr.sll_protocol) == 0x806)
-					modified |= arp_response(resp);
+					modified |= arp_response(resp,log);
 			}
 		}
 		close(resd);
@@ -622,18 +836,23 @@ int alive_ips(void)
 			int test;
 
 			now = time(NULL);
-			if(now - p->tested > 5*60) {
-				test = test_http(p->ip,htons(80));
+			if(now - p->tested > 15*60) {
+				test = test_http(p->ip,htons(80),0);
 				if(test != p->ottanta) {
 					p->ottanta = test;
 					modified = 1;
 				}
-				test = test_http(p->ip,htons(8080));
+				test = test_http(p->ip,htons(8080),0);
 				if(test != p->ottantaottanta) {
 					p->ottantaottanta = test;
 					modified = 1;
 				}
-				test = test_http(p->ip,htons(8000));
+				test = test_http(p->ip,htons(9000),0);
+				if(test != p->novemila) {
+					p->novemila = test;
+					modified = 1;
+				}
+				test = test_http(p->ip,htons(8000),0);
 				if(test != p->ottomila) {
 					p->ottomila = test;
 					modified = 1;
@@ -651,71 +870,51 @@ int alive_ips(void)
 	}
 	return modified;
 }
-void scan_loop(int esc)
+void *scan_loop(void * param)
 {
 	time_t now, checked_ports, checked_ips;
-	unsigned short *ports;
-	int size, ports_size;
-	pid_t pid, forked;
-	char msg[256];
-	int status;
+	pthread_t thread;
+	int size;
 
-	sprintf(msg,"%s: scan home network",RASP4YOU);
-	write_on_console(msg);
 
-	forked = -1;
-
+	pthread_mutex_init(&mutex_ports,NULL);
+	pthread_cond_init(&condition_ports,NULL);
+	pthread_mutex_init(&mutex_ips,NULL);
+	pthread_cond_init(&condition_ips,NULL);
 
 	checked_ips = checked_ports = 0;
 	for(;;) {
-		pid = waitpid(-1,&status,WNOHANG);
-		if(pid > 0) {
-			if(pid == forked)
-				forked = -1;
+		if(was_unreach) {
+			checked_ips = checked_ports = 0;
+			reachable_sleep();
 		}
 		now = time(NULL);
-		if(forked < 0 && now - checked_ports >= 60) {
+		if(ports_in_progress == 0 && now - checked_ports >= 15*60) {
 			unsigned short *p = listen_ports(&size);
 			if(!checked_ports || ports_size != size || memcmp(p,ports,size) || now - checked_ports >= 15*60) {
 				if(checked_ports)
 					free(ports);
-				forked = fork();
-				if(forked == 0) {
-					sprintf(msg,"%s: send services",RASP4YOU);
-					write_on_console(msg);
-					process_send_ports(p,size);
-					exit(0);
-				}
-				ports_size = size;
+
 				ports = p;
+				ports_size = size;
+				ports_in_progress = 1;
+				pthread_create(&thread, NULL, process_send_ports, (void*)NULL);
+			} else {
+				free(p);
 			}
 			checked_ports = now;
-			if(esc) {
-				wait(&status);
-				forked = -1;
-			}
 		}
-		if(forked < 0 && (alive_ips() || now - checked_ips >= 15*60)) {
-			forked = fork();
-			if(forked == 0) {
-				sprintf(msg,"%s: send machines",RASP4YOU);
-				write_on_console(msg);
-				process_send_ips();
-				exit(0);
-			}
+		if(ips_in_progress == 0 && (alive_ips(10,0) || now - checked_ips >= 15*60)) {
+			ips_in_progress = 1;
+			pthread_create(&thread, NULL, process_send_ips, (void*)NULL);
 			checked_ips = now;
-			if(esc) {
-				wait(&status);
-				forked = -1;
-			}
 		}
-		if(esc)
-			exit(0);
+		if(param != NULL) {
+			ports_sleep();
+			ips_sleep();
+			break;
+		}
 		sleep(10);
-		if(getppid() == 1) {
-			if(forked > 0)
-				kill(forked,SIGKILL);
-			exit(0);
-		}
 	}
+	return NULL;
 }

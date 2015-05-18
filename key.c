@@ -133,29 +133,14 @@ int check_key(void)
 	
 	if(checked >= 0)
 		return checked;
-#ifdef TEST
-	FILE *fp;
-
-	fp = fopen("rasp4you.key","r");
-	if(fp != NULL) {
-		char buf[512];
-		char *s;
-
-		fgets(buf,512,fp);
-		buf[strlen(buf)-1] = 0;
-		s = skip(buf,4); *(s-1) = 0;
-		s = skip(buf,3); strcpy(key,s); *(s-1) = 0;
-		s = skip(buf,2); strcpy(email,s); *(s-1) = 0;
-		sscanf(buf,"%u|",&serial);
-		fclose(fp);
-		return checked = 1;
-	}
-#endif
 	keybin = (char *)&marker[LENMARK];
-	memcpy(&serial,keybin + LENKEY,4);
-	//keybin[LENKEY] = 0;
-	if(*keybin == 0)
-		return checked = 0;
+	if(with_test)
+		memcpy(&serial,&with_test,4);
+	else {
+		memcpy(&serial,keybin + LENKEY,4);
+		if(*keybin == 0)
+			return checked = 0;
+	}
 	do_key();
 	return checked = 1;
 }

@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <linux/sockios.h>
@@ -18,6 +19,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <netpacket/packet.h>
 #include <linux/if_ether.h>
 #include <arpa/inet.h>
@@ -35,30 +37,26 @@ static char **ARGV;
 static struct udp_request *root_udp_request;
 static struct old_lan *old_lan;
 
+static pthread_mutex_t mutex_reachable;
+static pthread_cond_t condition_reachable;
+
+volatile int was_unreach = 0;
+volatile unsigned cameras = 0xFFFF;
+
 static char email[128];
 static int iam_a_daemon;
 static int email_chk;
-static int with_test;
 static int sd_local;
 static int sd_7766;
 
-struct sockaddr_in server_tcp;
-struct sockaddr_in server_udp;
-
-unsigned short LOCAL_PORT, REMOTE_PORT;
-
-static char *skip_blank(char *s)
+struct tcp_param
 {
-        while(*s == ' ' || *s == '\t')
-                s++;
-        return s;
-}
-static char *skip_to_blank(char *s)
-{
-        while(*s != ' ' && *s != '\t' && *s)
-                s++;
-        return s;
-}
+	unsigned ip;
+	unsigned short port;
+	char *header;
+};
+
+
 static int readstring(int fd,char *buf,int n)
 {
 	buf[0] = 0;
@@ -70,6 +68,28 @@ static int readstring(int fd,char *buf,int n)
 		*buf = 0;
 	}
 	return 0;
+}
+void reachable_sleep(void)
+{
+        pthread_mutex_lock(&mutex_reachable);
+	if(was_unreach == 1)
+        	pthread_cond_wait(&condition_reachable,&mutex_reachable);
+        pthread_mutex_unlock(&mutex_reachable);
+}
+void reachable_wakeup(void)
+{
+        pthread_mutex_lock(&mutex_reachable);
+	was_unreach = 0;
+        pthread_cond_signal(&condition_reachable);
+        pthread_mutex_unlock(&mutex_reachable);
+}
+static char *dupstring(char *s)
+{
+	char *t;
+
+	t = malloc(strlen(s)+1);
+	strcpy(t,s);
+	return t;
 }
 static void receive_firmware(char *left_buf)
 {
@@ -114,51 +134,57 @@ static void receive_firmware(char *left_buf)
 	unlink(PID_FILE);
 	execl(EXE_FILE,PROGRAM_NAME,"--firmware",NULL);
 }
-static void process_tcp(char *header,unsigned ip,unsigned short port)
+static void *process_tcp(void * param)
 {
 	int left, right, left_count, right_count;
 	char *left_buf, *right_buf, *s;
 	struct sockaddr_in from;
+	struct tcp_param *tcp;
 	fd_set rdset, wrset;
 	int not_connected;
 	char secret[128];
-	//int option = 0;
 	socklen_t len;
-	int status;
-	pid_t pid;
 	int i;
 
-	pid = fork();
-	if(pid > 0) {
-		waitpid(pid,&status,0);
-		return;
-	}
-	if(fork() != 0)
-		exit(0);
-
-	s = strchr(header,'?'); *s = 0;
-	create_secret(secret,serial,key,header);
-	sprintf(header+strlen(header),"?%s",secret);
-
-	for(i = 0;i < 1024;i++)
-		close(i);
-	left_buf  = malloc(16*1024);
-	right_buf = malloc(16*1024);
+	tcp = (struct tcp_param *)param;
 
 	left = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0)
-		exit(0);
+	if(connect(left,(struct sockaddr *)&server_tcp,sizeof(server_tcp)) < 0) {
+		close(left);
+		free(tcp->header);
+		free(tcp);
+		return NULL;
+	}
+	s = strchr(tcp->header,'?'); *s = 0;
+	create_secret(secret,serial,key,tcp->header);
+	sprintf(tcp->header+strlen(tcp->header),"?%s",secret);
 
-	right = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-	if(ip == 0) {
+	from.sin_family = AF_INET;
+	from.sin_port = tcp->port;
+	if(tcp->ip == 0) {
 		len = sizeof(from);
 		getsockname(left,(struct sockaddr *)&from,&len);
 	} else
-		from.sin_addr.s_addr = ip;
-	from.sin_family = AF_INET;
-	from.sin_port = port;
+		from.sin_addr.s_addr = tcp->ip;
 
+	if(tcp->port == camerata_port) {
+		for(i = 0;i <= 16;i++) {
+			if(!local_addresses[i])
+				break;
+			if(from.sin_addr.s_addr == local_addresses[i]) {
+				camerata_connect(left,tcp->header);
+				free(tcp->header);
+				free(tcp);
+				return NULL;
+			}
+		}
+	}
+
+	left_buf  = malloc(16*1024);
+	right_buf = malloc(16*1024);
+
+	right = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if(connect(right,(struct sockaddr *)&from,sizeof(from)) < 0) {
 		not_connected = 1;
 		right_count = -1;
@@ -192,14 +218,8 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 	}
 	if(right_count < 0)
 		gracefulshut(left);
-
-
-	write(left,header,strlen(header)+1);
-
-	if(strncmp(header,"GET / HTTP/1",12) != 0) {
-		int option = 1;
-		setsockopt(left,IPPROTO_TCP,TCP_NODELAY,(char*)&option,sizeof(option));
-	}
+	else
+		write(left,tcp->header,strlen(tcp->header)+1);
 
 	left_count = 0;
 	for(;;) {
@@ -230,7 +250,7 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 			left_count = read(left,left_buf,16*1024);
 			if(left_count <= 0) {
 				if(right_count < 0) {
-					exit(0);
+					goto end;
 				}
 				gracefulshut(right);
 				left_count = -1;
@@ -246,7 +266,7 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 			right_count = read(right,right_buf,16*1024);
 			if(right_count <= 0) {
 				if(left_count < 0) {
-					exit(0);
+					goto end;
 				}
 				gracefulshut(left);
 				right_count = -1;
@@ -258,9 +278,15 @@ static void process_tcp(char *header,unsigned ip,unsigned short port)
 				right_count = 0;
 		}
 	}
-	//setsockopt(left,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
-	//setsockopt(right,SOL_SOCKET,SO_KEEPALIVE,(char *)&option,sizeof(option));
-	exit(0);
+end:
+	close(left);
+	close(right);
+
+	free(tcp->header);
+	free(right_buf);
+	free(left_buf);
+	free(tcp);
+	return NULL;
 }
 static void read_email_address(char *s,int n)
 {
@@ -271,26 +297,6 @@ static void read_email_address(char *s,int n)
 		s++;
 	}
 	*s = 0;
-}
-void write_on_console(char *msg)
-{
-	if(iam_a_daemon) {
-		sprintf(ARGV[0],"%s (%d.%d)",msg,release,build);
-		return;
-	}
-#ifdef notdef
-	{
-	static int len;
-	int n;
-
-	printf("%s",msg);
-	for(n = strlen(msg);n < len;n++)
-		putchar(' ');
-	putchar('\r');
-	fflush(stdout);
-	len = strlen(msg);
-	}
-#endif
 }
 static int register_machine(int fd,unsigned ip)
 {
@@ -423,122 +429,6 @@ static void decode_time(char *buf,unsigned t)
 	}
 	sprintf(buf,"%d seconds",t);
 }
-static void get_local_addresses(void)
-{
-	unsigned ip, mask, brd, local;
-	int j, size, i, n;
-	struct old_lan *q;
-	struct ifreq *ifp;
-	struct ifconf ifc;
-	struct ifreq ifr;
-	int sd, index;
-	struct lan *p;
-	char buf[4096];
-	char hw[6];
-
-	n = LOCAL_ADDR = 0;
-	ifc.ifc_len = 4096;
-	ifc.ifc_ifcu.ifcu_buf = buf;
-	sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	ioctl(sd, SIOCGIFCONF, &ifc);
-	size = ifc.ifc_len / sizeof(struct ifreq);
-	for (j = 0; j < size; j++) {
-		ifp = &ifc.ifc_ifcu.ifcu_req[j];
-		if(ifp->ifr_addr.sa_family != AF_INET)
-			continue;
-		strcpy(ifr.ifr_name,ifp->ifr_name);
-		ioctl(sd,SIOCGIFFLAGS,&ifr);
-		if(!(ifr.ifr_flags & IFF_UP))
-			continue;
-		if(ifr.ifr_flags & IFF_LOOPBACK)
-			continue;
-		ioctl(sd,SIOCGIFADDR,&ifr);
-		local_addresses[n++] = local = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
-
-		ioctl(sd,SIOCGIFINDEX,&ifr);
-		index = ifr.ifr_ifindex;
-		ioctl(sd,SIOCGIFHWADDR,&ifr);
-		memcpy(hw,ifr.ifr_hwaddr.sa_data,6);
-
-		ioctl(sd,SIOCGIFBRDADDR,&ifr);
-		brd = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
-
-		ioctl(sd,SIOCGIFNETMASK,&ifr);
-		mask = ((struct sockaddr_in *) &ifr.ifr_addr)->sin_addr.s_addr;
-
-		if((local & mask) == (router & mask))
-			LOCAL_ADDR = local;
-		if(!LOCAL_ADDR) {
-			if(strcmp(ifp->ifr_name,"eth0") == 0)
-				LOCAL_ADDR = local;
-			else if(!LOCAL_ADDR)
-				LOCAL_ADDR = local;
-		}
-
-
-		mask |= 0xFFFFFF;
-		n = ~mask;
-		n = ntohl(n);
-		for(i = n;i >= 0;i--) {
-			ip = (local & mask) | htonl(i);
-			if(brd == ip)
-				continue;
-			for(p = root_lan;p != NULL;p = p->next)
-				if(p->ip == ip)
-					break;
-			if(p != NULL)
-				continue;
-			p = calloc(1,sizeof(struct lan));
-			p->local  = local;
-			p->index  = index;
-			p->ip     = ip;
-			memcpy(p->hw,hw,6);
-			p->next = root_lan;
-			root_lan = p;
-		}
-	}
-	close(sd);
-	if(old_lan == NULL)
-		return;
-	for(q = old_lan;q->ip != 0;q++) {
-		for(p = root_lan;p != NULL;p = p->next) {
-			if(q->ip == p->ip) {
-				memcpy(p->mac,q->mac,6);
-				break;
-			}
-		}
-	}
-}
-static void get_router(void)
-{
-	unsigned ip, flags;
-	char buf[512];
-	FILE *fp;
-	char *s;
-
-	fp = fopen("/proc/net/route","r");
-	while(fgets(buf,512,fp) != NULL) {
-		s = skip_to_blank(buf);
-		s = skip_blank(s);
-		if(!isxdigit(*s))
-			continue;
-		if(strncmp(s,"00000000",8))
-			continue;
-		s = skip_to_blank(s);
-		s = skip_blank(s);
-		if(sscanf(s,"%x",&ip) != 1)
-			continue;
-		s = skip_to_blank(s);
-		s = skip_blank(s);
-		if(sscanf(s,"%x",&flags) != 1)
-			continue;
-		if(flags & 3) {
-			router = ip;
-			break;
-		}
-	}
-	fclose(fp);
-}
 static void connect_to_server(struct hostent *h)
 {
 	struct sockaddr_in from;
@@ -651,9 +541,8 @@ static void main_loop(struct hostent *h)
 	struct sockaddr_in from;
 	struct udp_request *u;
 	unsigned nonce, NONCE;
-	pid_t pid_scan = -1;
 	int first_time = 1;
-	int was_unreach = 0;
+	pthread_t thread;
 	struct timeval tv;
 	char secret[512];
 	unsigned SERIAL;
@@ -701,13 +590,21 @@ static void main_loop(struct hostent *h)
 				}
 			}
 			close(sd_7766);
+			from.sin_family      = AF_INET;
 			from.sin_addr.s_addr = INADDR_ANY;
 			from.sin_port = htons(0);
 			sd_7766 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 			bind(sd_7766,(struct sockaddr *)&from,sizeof(from));
+
+			len = sizeof(from);
+			getsockname(sd_7766,(struct sockaddr *)&from,&len);
+			REMOTE_PORT = from.sin_port;
+
 			last_tx = last_rx = 0;
 			sprintf(msg,"%s is unreachable",RASP4YOU);
 			write_on_console(msg);
+
+			nonce = 0;
 			was_unreach = 1;
 		}
 		tv.tv_usec = 0;
@@ -777,18 +674,8 @@ static void main_loop(struct hostent *h)
 
 			cloned = strncmp(rxbuf,"KCA|",4) == 0;
 
-			if(was_unreach) {
-				if(pid_scan > 0) {
-					kill(pid_scan,SIGKILL);
-					wait(&pid_scan);
-					pid_scan = fork();
-					if(pid_scan == 0) {
-						scan_loop(0);
-						exit(0);
-					}
-				}
-				was_unreach = 0;
-			}
+			if(was_unreach)
+				reachable_wakeup();
 			if(sscanf(rxbuf+4,"%x|%x|%d|%x|%x|%d|%d",&SERIAL,&NONCE,&todo,&paidtime,&freetime,&status,&quality) != 7)
 				continue;
 			name = skip(rxbuf,8);
@@ -804,7 +691,7 @@ static void main_loop(struct hostent *h)
 				decode_time(txbuf,freetime);
 			nonce = NONCE;
 			last_rx = time(NULL);
-			if(iam_a_daemon) {
+			if(iam_a_daemon || with_test) {
 				if(!status) {
 					sprintf(msg,"Waiting for registration ....");
 					write_on_console(msg);
@@ -814,12 +701,9 @@ static void main_loop(struct hostent *h)
 					receive_firmware(rxbuf);
 					continue;
 				}
+				cameras = status >> 16;
 				if(first_time) {
-					pid_scan = fork();
-					if(pid_scan == 0) {
-						scan_loop(0);
-						exit(0);
-					}
+					pthread_create(&thread, NULL, process_camerata, (void*)NULL);
 					first_time = 0;
 				}
 				if(cloned)
@@ -837,65 +721,35 @@ static void main_loop(struct hostent *h)
 				continue;
 			}
 			if(status) {
-				if(!with_test) {
-					printf("\rWait a moment please, finishing installation.\n");
-					install_exe("/proc/self/exe");
-					install_initd(1);
-					printf("\nInstallation is complete !\n");
+				close(sd_7766);
+				close(sd_local);
+				printf("\rWait a moment please, finishing installation.\n");
+				install_exe("/proc/self/exe");
+				install_initd(1);
+				printf("\nInstallation is complete !\n");
+				exit(0);
+			}
+			if(first_time) {
+				if(email_chk == 1) {
+					printf("Email %s seems not be valid !!\n",email);
 					exit(0);
-				} else {
-					if(pid_scan < 0) {
-						pid_scan = fork();
-						if(pid_scan == 0) {
-							scan_loop(0);
-							exit(0);
-						}
-					}
-					if(quality >= 90) {
-						if(freetime)
-							printf("%s.%s is waiting %s for free %s or pay now at https://%s",name,RASP4YOU,rxbuf,txbuf,PAYSITE);
-						else if(paidtime)
-							printf("%s.%s is available for %s",name,RASP4YOU,rxbuf);
-						else
-							printf("%s.%s is available",name,RASP4YOU);
-					} else 
-						printf("Please check your ADSL because quality %d%% is low !",quality);
-					printf("\n");
 				}
-			} else {
-				if(first_time) {
-					if(email_chk == 1) {
-						printf("Email %s seems not be valid !!\n",email);
-						exit(0);
-					}
-					if(email_chk == 2 || email_chk == 3) {
-						printf("Email %s temporarily unavailable. Retry later !!\n",email);
-						exit(0);
-					}
+				if(email_chk == 2 || email_chk == 3) {
+					printf("Email %s temporarily unavailable. Retry later !!\n",email);
+					exit(0);
+				}
 /**
-					if(email_chk == 3) {
-						printf("Server %s temporarily unavailable. Retry later !!\n",RASP4YOU);
-						exit(0);
-					}
-**/
-					printf("Read email sent to %s for finish registration\n",email);
-					printf("Waiting for registration ....");
-					fflush(stdout);
-					if(fork() == 0) {
-						scan_loop(1);
-						exit(0);
-					}
-					first_time = 0;
-					wait(&status);
-					if(with_test) {
-						install_exe("/proc/self/exe");
-						pid_scan = fork();
-						if(pid_scan == 0) {
-							scan_loop(0);
-							exit(0);
-						}
-					}
+				if(email_chk == 3) {
+					printf("Server %s temporarily unavailable. Retry later !!\n",RASP4YOU);
+					exit(0);
 				}
+**/
+				printf("Read email sent to %s for finish registration\n",email);
+				printf("Waiting for registration ....");
+				fflush(stdout);
+				first_time = 0;
+				scan_loop((void *)1);
+				last_rx = last_tx = 0;
 			}
 			continue;
 		}
@@ -905,8 +759,14 @@ static void main_loop(struct hostent *h)
 
 			if(sscanf(rxbuf+4,"%x|%x.%hx<-",&SERIAL,&ip,&port) != 3)
 				continue;
-			if(serial == SERIAL && check_secret(serial,yek,rxbuf))
-				process_tcp(rxbuf,ip,port);
+			if(serial == SERIAL && check_secret(serial,yek,rxbuf)) {
+				struct tcp_param *tcp  = malloc(sizeof(struct tcp_param));
+
+				tcp->header = dupstring(rxbuf);
+				tcp->port = port;
+				tcp->ip  = ip;
+				pthread_create(&thread, NULL, process_tcp, (void*)tcp);
+			}
 			continue;
 		}
 		if(strncmp(rxbuf,"UDP|",4) == 0) {
@@ -942,6 +802,7 @@ static void main_loop(struct hostent *h)
 int main(int argc,char **argv)
 {
 	sigset_t sig_to_block;
+	struct old_lan *q;
 	struct hostent *h;
 	char msg[128];
 	int n;
@@ -950,19 +811,13 @@ int main(int argc,char **argv)
         sigaddset(&sig_to_block, SIGPIPE);
 	sigprocmask(SIG_BLOCK, &sig_to_block, NULL);
 
-#ifdef TEST
-	if(argc > 1 && strcmp(argv[1],"-k") == 0) {
-		get_machine_id();
-		make_key();
-		printf("1|%s|%s|%s|%d\n",machine_id,"rasp4you@rasp4you.com",key,2);
-		exit(0);
+	prctl(PR_SET_PDEATHSIG,SIGKILL);
+
+	if(argc > 2 && strcmp(argv[1],"-t") == 0) {
+		with_test = atoi(argv[2]);
+		argc += 2;
+		argv += 2;
 	}
-	if(argc > 1 && strcmp(argv[1],"-t") == 0) {
-		with_test = 1;
-		argc++;
-		argv++;
-	}
-#endif
 	if(geteuid() != 0) {
 		fprintf(stderr,"You must be root\n");
 		exit(1);
@@ -991,7 +846,7 @@ int main(int argc,char **argv)
 		printf("\nUninstall is complete !\n");
 		exit(0);
 	}
-	if(!iam_a_daemon) {
+	if(!with_test && !iam_a_daemon) {
 		system("sh -c \"if which invoke-rc.d >/dev/null 2>&1; then invoke-rc.d rasp4you stop; else /etc/init.d/rasp4you stop ; fi\" > /dev/null 2>&1");
 		system("update-rc.d -f rasp4you remove > /dev/null 2>&1");
 	}
@@ -1016,7 +871,26 @@ int main(int argc,char **argv)
 	}
 	get_router();
 	get_local_addresses();
+	if(old_lan != NULL) {
+		struct lan *p;
+
+		for(q = old_lan;q->ip != 0;q++) {
+			for(p = root_lan;p != NULL;p = p->next) {
+				if(q->ip == p->ip) {
+					memcpy(p->mac,q->mac,6);
+					break;
+				}
+			}
+		}
+	}
 	connect_to_server(h);
 	main_loop(h);
 	return 0;
+}
+void write_on_console(char *msg)
+{
+	if(iam_a_daemon)
+		sprintf(ARGV[0],"%s (%d.%d)",msg,release,build);
+	else if(with_test)
+		printf("%s (%d.%d)\n",msg,release,build);
 }

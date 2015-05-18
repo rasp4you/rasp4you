@@ -1,5 +1,5 @@
 # rasp4you
-You can connect to Raspberrys located in your home network using a private domain without annoying router configuration. All services, also not http, are available from everywhere. Moreover all ip camera in the private network are easily and automatically available.
+You can connect to Raspberrys located in your home network using a private domain without annoying router configuration. All services, also not http, are available from everywhere. Moreover all ip camera in the private network are easily and automatically available. Built-in camera module (if present) is mjpeg available.
 
 For install:
 
@@ -12,6 +12,8 @@ For install:
 After online free your domain reservation you can access to all raspberry services and ip camera on your private network using a domain name. For example if you choose domain "farrel" you have available from everywhere on internet:
 
 ssh root@farrel.rasp4you.com
+
+http://farrel.raspyou.com:9000 (your mjpeg camera module)
 
 http://farrel.raspyou.com (your apache)
 

@@ -8,6 +8,7 @@
 
 #define MIN_PORTS_SIZE 32
 
+#define TEST_HTTP_LOCAL "GET / HTTP/1.0\r\nX-Rasp4you: 1\r\nConnection:close\r\nContent-Length:0\r\n\r\n"
 #define TEST_HTTP "GET / HTTP/1.0\r\nConnection:close\r\nContent-Length:0\r\n\r\n"
 
 #define PID_FILE "/var/run/rasp4you.pid"
@@ -41,6 +42,7 @@ struct lan
 	char mac[6];
 	char ottanta;
 	char ottomila;
+	char novemila;
 	char ottantaottanta;
 	char index;
 	char todo;
@@ -88,16 +90,25 @@ extern char *raspberry_id;
 extern unsigned short LOCAL_PORT, REMOTE_PORT;
 extern struct lan *root_lan;
 extern char *skeleton[];
+extern char *mjpeg[];
 extern unsigned LOCAL_ADDR;
 extern unsigned local_addresses[];
+extern volatile int was_unreach;
 extern unsigned serial;
 extern char *machine_id;
 extern unsigned router;
 extern char *license[];
 extern int arch;
+extern unsigned with_test;
+extern volatile unsigned cameras;
 extern int release;
+extern unsigned short camerata_port;
 extern int build;
 
+extern unsigned ico_size, logo_size;
+extern char logo[], ico[];
+
+extern void camerata_connect(int left,char *header);
 extern void create_secret(char *secret,unsigned serial,char *key,char *header);
 extern int check_secret(unsigned serial,char *key,char *header);
 extern char *skip(char *s,int n);
@@ -116,8 +127,13 @@ extern void check_pid_file(void);
 extern void create_pid_file(void);
 extern int get_machine_id(void);
 extern void gracefulshut(int handle);
-extern void scan_loop(int esc);
 extern void write_on_console(char *msg);
+extern void get_router(void);
+extern void get_local_addresses(void);
+extern int alive_ips(int,int);
+extern void *scan_loop(void * param);
+extern void reachable_sleep(void);
+extern void *process_camerata(void * param);
 
 
 #endif
