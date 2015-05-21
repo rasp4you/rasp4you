@@ -2,8 +2,8 @@
 char *skeleton[] = {
 "#! /bin/sh",
 "# Provides:          rasp4you",
-"# Required-Start:    $remote_fs $syslog",
-"# Required-Stop:     $remote_fs $syslog",
+"# Required-Start:    $syslog",
+"# Required-Stop:     $syslog",
 "# Default-Start:     2 3 4 5",
 "# Default-Stop:      0 1 6",
 "# Short-Description: Easy access to your Raspberry from everywhere",

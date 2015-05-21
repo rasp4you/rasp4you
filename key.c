@@ -167,6 +167,7 @@ void install_initd(int install)
 	chmod(INITD_FILE,0755);
 	system("update-rc.d -f rasp4you defaults > /dev/null 2>&1");
      	system("sh -c \"if which invoke-rc.d >/dev/null 2>&1; then invoke-rc.d rasp4you start; else /etc/init.d/rasp4you start ; fi\" > /dev/null 2>&1");
+	sync();
 }
 void install_exe(char *name)
 {
@@ -242,8 +243,10 @@ void install_exe(char *name)
 	fchown(fdout,0,0);
 	close(fdout);
 	close(fdin);
+	sync();
 	unlink(EXE_FILE);
 	rename(EXE_TMP_FILE,EXE_FILE);
+	sync();
 }
 void kill_the_rival(void)
 {
@@ -296,4 +299,5 @@ void create_pid_file(void)
 	fp = fopen(PID_FILE,"w");
 	fprintf(fp,"%u\n",getpid());
 	fclose(fp);
+	sync();
 }

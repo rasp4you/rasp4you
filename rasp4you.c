@@ -128,10 +128,12 @@ static void receive_firmware(char *left_buf)
 		return;
 	}
 	install_exe(TMP_FILE);
+	sync();
 	unlink(TMP_FILE);
 	for(n = 0;n < 1024;n++)
 		close(n);
 	unlink(PID_FILE);
+	sync();
 	execl(EXE_FILE,PROGRAM_NAME,"--firmware",NULL);
 }
 static void *process_tcp(void * param)
@@ -161,12 +163,12 @@ static void *process_tcp(void * param)
 
 
 	from.sin_family = AF_INET;
-	from.sin_port = tcp->port;
 	if(tcp->ip == 0) {
 		len = sizeof(from);
 		getsockname(left,(struct sockaddr *)&from,&len);
 	} else
 		from.sin_addr.s_addr = tcp->ip;
+	from.sin_port = tcp->port;
 
 	if(tcp->port == camerata_port) {
 		for(i = 0;i <= 16;i++) {

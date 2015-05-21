@@ -309,7 +309,8 @@ next:
 				}
 				else
 					rem = 0;
-				size = read(c->sd,buf+rem,size);
+				if(size > 0)
+					size = read(c->sd,buf+rem,size);
 				if(size <= 0) {
 					close_channel(c);
 					continue;
